@@ -15,8 +15,9 @@ def pause_for_user():
     input(f"{Style.BRIGHT}[PULSA INTRO PARA CONTINUAR]{Style.RESET_ALL}\n")
 
 class JudgeAI:
-    def __init__(self, model_name="gemini-2.5-flash"):
+    def __init__(self, model_name="gemini-2.5-flash", is_ollama_model=False):
         self.model_name = model_name
+        self.is_ollama_model = is_ollama_model
         self.client = self._initialize_model(model_name)
         self.history = []
         self.system_prompt = self._load_prompt("judge_prompt.md")
@@ -29,7 +30,7 @@ class JudgeAI:
             return genai.GenerativeModel(model_name)
         elif "claude" in model_name:
             return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        elif "llama" in model_name:
+        elif self.is_ollama_model: # Usar el nuevo indicador
             return ollama.Client(host=os.getenv("OLLAMA_BASE_URL"))
         else:
             raise ValueError(f"Modelo no soportado: {model_name}")
@@ -47,27 +48,60 @@ class JudgeAI:
         return prompt_content
 
     def _generate_initial_story(self):
-        if "gemini" not in self.model_name:
-            raise ValueError("La generación de historias iniciales solo está implementada para Gemini.")
-        
-        # Inicializar el chat con el system_prompt para la generación de la historia
-        initial_history_for_story_gen = [
-            {"role": "user", "parts": [{"text": self.system_prompt + "\nAhora, crea una historia de misterio de Black Story con temática Kingdom Hearts. La historia debe ser detallada y presentar un enigma que la IA Detective deba resolver. No incluyas la respuesta."}]}
-        ]
-        chat_long = self.client.start_chat(history=initial_history_for_story_gen)
-        response_long = chat_long.send_message("Genera la historia larga.")
-        long_story_content = response_long.text.strip()
+        if "gemini" in self.model_name:
+            # Lógica existente para Gemini
+            initial_history_for_story_gen = [
+                {"role": "user", "parts": [{"text": self.system_prompt + "\nAhora, crea una historia de misterio de Black Story con temática Kingdom Hearts. La historia debe ser detallada y presentar un enigma que la IA Detective deba resolver. No incluyas la respuesta."}]}
+            ]
+            chat_long = self.client.start_chat(history=initial_history_for_story_gen)
+            response_long = chat_long.send_message("Genera la historia larga.")
+            long_story_content = response_long.text.strip()
 
-        # Usar un nuevo chat para la versión corta, manteniendo el contexto de la historia larga
-        initial_history_for_short_story_gen = [
-            {"role": "user", "parts": [{"text": self.system_prompt + "\nBasado en la siguiente historia larga, crea una versión muy concisa de la historia de misterio de Black Story con temática Kingdom Hearts, que sirva como la 'Black Story inicial' para el juego. Debe ser un resumen muy breve que presente el enigma sin dar la solución. No incluyas la respuesta."}]},
-            {"role": "model", "parts": [{"text": long_story_content}]}
-        ]
-        chat_short = self.client.start_chat(history=initial_history_for_short_story_gen)
-        response_short = chat_short.send_message("Genera la versión corta de la historia.")
-        short_story_content = response_short.text.strip()
+            initial_history_for_short_story_gen = [
+                {"role": "user", "parts": [{"text": self.system_prompt + "\nBasado en la siguiente historia larga, crea una versión muy concisa de la historia de misterio de Black Story con temática Kingdom Hearts, que sirva como la 'Black Story inicial' para el juego. Debe ser un resumen muy breve que presente el enigma sin dar la solución. No incluyas la respuesta."}]},
+                {"role": "model", "parts": [{"text": long_story_content}]}
+            ]
+            chat_short = self.client.start_chat(history=initial_history_for_short_story_gen)
+            response_short = chat_short.send_message("Genera la versión corta de la historia.")
+            short_story_content = response_short.text.strip()
+            
+            # Inicializar la sesión de chat principal del juez con la historia corta
+            self.chat_session = self.client.start_chat(history=[
+                {"role": "user", "parts": [{"text": self.system_prompt + "\nAquí está la historia inicial del juego:\n" + short_story_content}]},
+                {"role": "model", "parts": [{"text": "Entendido. Estoy listo para juzgar."}]}
+            ])
+
+        elif self.is_ollama_model:
+            # Lógica para Ollama
+            # Generar historia larga
+            messages_long = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": "Crea una historia de misterio detallada de al menos 150 palabras con un enigma. No incluyas la respuesta ni la solución."}
+            ]
+            response_long = self.client.chat(model=self.model_name, messages=messages_long)
+            long_story_content = response_long['message']['content'].strip()
+
+            # Generar historia corta
+            messages_short = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": f"Basado en la siguiente historia larga, crea un resumen muy breve (máximo 30 palabras) que presente el enigma sin dar la solución. No incluyas la respuesta.\nHistoria larga:\n{long_story_content}"}
+            ]
+            response_short = self.client.chat(model=self.model_name, messages=messages_short)
+            short_story_content = response_short['message']['content'].strip()
+
+            # Para Ollama, el chat_session se gestiona de forma diferente, no hay un objeto de sesión persistente como en Gemini.
+            # El historial se pasa en cada llamada a `client.chat`.
+            # Sin embargo, para mantener la consistencia con la estructura del juez, podemos inicializar `self.history`
+            # con el prompt del sistema y la historia corta.
+            self.history.append({"role": "system", "content": self.system_prompt})
+            self.history.append({"role": "user", "content": "Aquí está la historia inicial del juego:\n" + short_story_content})
+            self.history.append({"role": "model", "content": "Entendido. Estoy listo para juzgar."})
+            self.chat_session = None # No se usa para Ollama de esta manera
+
+        else:
+            raise ValueError("La generación de historias iniciales solo está implementada para Gemini y Ollama.")
         
-        # Guardar las historias en la carpeta 'stories'
+        # Guardar las historias en la carpeta 'stories' (común para ambos)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         story_filename = f"stories/story_{timestamp}.md"
         with open(story_filename, "w", encoding="utf-8") as f:
@@ -77,12 +111,6 @@ class JudgeAI:
             f.write(short_story_content)
             f.write("\n")
         
-        # Inicializar la sesión de chat principal del juez con la historia corta
-        self.chat_session = self.client.start_chat(history=[
-            {"role": "user", "parts": [{"text": self.system_prompt + "\nAquí está la historia inicial del juego:\n" + short_story_content}]},
-            {"role": "model", "parts": [{"text": "Entendido. Estoy listo para juzgar."}]}
-        ])
-
         # Envolver la historia corta generada en los tags para consistencia
         return f"<Black Story inicial>\n{short_story_content}\n</Black Story inicial>"
 
@@ -107,7 +135,7 @@ class JudgeAI:
                 messages=[{"role": "user", "content": question}] # Claude espera solo el último mensaje del usuario
             )
             answer = response.content[0].text.strip()
-        elif "llama" in self.model_name:
+        elif self.is_ollama_model: # Usar el nuevo indicador
             messages_for_model = [{"role": "system", "content": self.system_prompt}] + self.history
             response = self.client.chat(
                 model=self.model_name,
@@ -122,8 +150,9 @@ class JudgeAI:
         return answer
 
 class DetectiveAI:
-    def __init__(self, model_name="gemini-2.5-flash"):
+    def __init__(self, model_name="gemini-2.5-flash", is_ollama_model=False):
         self.model_name = model_name
+        self.is_ollama_model = is_ollama_model
         self.client = self._initialize_model(model_name)
         self.history = []
         self.system_prompt = self._load_prompt("detective_prompt.md")
@@ -134,7 +163,7 @@ class DetectiveAI:
             return genai.GenerativeModel(model_name)
         elif "claude" in model_name:
             return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        elif "llama" in model_name:
+        elif self.is_ollama_model: # Usar el nuevo indicador
             return ollama.Client(host=os.getenv("OLLAMA_BASE_URL"))
         else:
             raise ValueError(f"Modelo no soportado: {model_name}")
@@ -186,9 +215,12 @@ class DetectiveAI:
                 messages=[{"role": "user", "content": user_instruction}] # Claude espera solo el último mensaje del usuario
             )
             next_move = response.content[0].text.strip()
-        elif "llama" in self.model_name:
+        elif self.is_ollama_model: # Usar el nuevo indicador
             messages_for_model = [{"role": "system", "content": self.system_prompt}]
             for entry in judge_history:
+                # Asegurarse de que el historial se construya correctamente para Ollama
+                # El rol 'user' en judge_history se convierte en 'assistant' para el detective
+                # y el rol 'model' en judge_history se convierte en 'user' para el detective
                 if entry["role"] == "user":
                     messages_for_model.append({"role": "assistant", "content": entry["content"]})
                 elif entry["role"] == "model":
@@ -210,14 +242,32 @@ def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(description="Simulación del juego Black Story con IAs.")
-    parser.add_argument("-m", "--model", type=str, default="gemini-2.5-flash",
-                        help="Modelo de IA a usar para el Juez y el Detective (ej. gemini-2.5-flash, claude-3-opus-20240229, llama3).")
+    parser.add_argument("-m1", "--model1", type=str, default="gemini-2.5-flash",
+                        help="Modelo de IA a usar para el Juez (ej. gemini-2.5-flash, claude-3-opus-20240229, ollama gemma3:270m).")
+    parser.add_argument("-m2", "--model2", type=str, default="gemini-2.5-flash",
+                        help="Modelo de IA a usar para el Detective (ej. gemini-2.5-flash, claude-3-opus-20240229, ollama gemma3:270m).")
     args = parser.parse_args()
 
-    model_to_use = args.model
+    # Procesar el modelo para el Juez
+    model_arg_judge = args.model1
+    is_ollama_model_judge = False
+    if model_arg_judge.startswith("ollama "):
+        model_name_judge = model_arg_judge[len("ollama "):].strip()
+        is_ollama_model_judge = True
+    else:
+        model_name_judge = model_arg_judge
 
-    judge_ai = JudgeAI(model_name=model_to_use)
-    detective_ai = DetectiveAI(model_name=model_to_use)
+    # Procesar el modelo para el Detective
+    model_arg_detective = args.model2
+    is_ollama_model_detective = False
+    if model_arg_detective.startswith("ollama "):
+        model_name_detective = model_arg_detective[len("ollama "):].strip()
+        is_ollama_model_detective = True
+    else:
+        model_name_detective = model_arg_detective
+
+    judge_ai = JudgeAI(model_name=model_name_judge, is_ollama_model=is_ollama_model_judge)
+    detective_ai = DetectiveAI(model_name=model_name_detective, is_ollama_model=is_ollama_model_detective)
 
     print(f"{Fore.CYAN}IA 1 ({judge_ai.model_name}): {judge_ai.get_initial_story()}{Style.RESET_ALL}")
     pause_for_user()
