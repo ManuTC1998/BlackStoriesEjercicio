@@ -3,7 +3,6 @@ import time
 import argparse
 from dotenv import load_dotenv
 import google.generativeai as genai
-import anthropic
 import ollama
 from colorama import Fore, Style, init
 
@@ -29,7 +28,11 @@ class JudgeAI:
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
             return genai.GenerativeModel(model_name)
         elif "claude" in model_name:
-            return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            try:
+                import anthropic
+                return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            except ImportError:
+                raise ImportError("La librería 'anthropic' no está instalada. Por favor, ejecuta 'pip install anthropic' para usar modelos de Claude.")
         elif self.is_ollama_model: # Usar el nuevo indicador
             return ollama.Client(host=os.getenv("OLLAMA_BASE_URL"))
         else:
@@ -50,6 +53,9 @@ class JudgeAI:
     def _generate_initial_story(self):
         if "gemini" in self.model_name:
             # Lógica existente para Gemini
+            # Lógica existente para Gemini
+            # Usar system_instruction para el system_prompt
+            # Lógica existente para Gemini (revertida para compatibilidad con versiones antiguas de la API)
             initial_history_for_story_gen = [
                 {"role": "user", "parts": [{"text": self.system_prompt + "\nAhora, crea una historia de misterio de Black Story con temática Kingdom Hearts. La historia debe ser detallada y presentar un enigma que la IA Detective deba resolver. No incluyas la respuesta."}]}
             ]
@@ -76,7 +82,7 @@ class JudgeAI:
             # Generar historia larga
             messages_long = [
                 {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": "Crea una historia de misterio detallada de al menos 150 palabras con un enigma. No incluyas la respuesta ni la solución."}
+                {"role": "user", "content": "Crea una historia de misterio. Debe ser detallada, de al menos 150 palabras, y presentar un enigma. No incluyas la respuesta ni la solución."}
             ]
             response_long = self.client.chat(model=self.model_name, messages=messages_long)
             long_story_content = response_long['message']['content'].strip()
@@ -162,7 +168,11 @@ class DetectiveAI:
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
             return genai.GenerativeModel(model_name)
         elif "claude" in model_name:
-            return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            try:
+                import anthropic
+                return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            except ImportError:
+                raise ImportError("La librería 'anthropic' no está instalada. Por favor, ejecuta 'pip install anthropic' para usar modelos de Claude.")
         elif self.is_ollama_model: # Usar el nuevo indicador
             return ollama.Client(host=os.getenv("OLLAMA_BASE_URL"))
         else:
@@ -172,61 +182,89 @@ class DetectiveAI:
         with open(f"prompts/{filename}", "r", encoding="utf-8") as f:
             return f.read()
 
-    def get_next_move(self, judge_history):
-        if "gemini" in self.model_name:
-            # Construir el historial para Gemini, asegurando la alternancia user/model
-            # El system_prompt se fusiona con el primer mensaje del usuario
-            gemini_history = []
-            
-            # Añadir el system_prompt como parte del primer mensaje del usuario
-            initial_user_message = self.system_prompt
-            if judge_history:
-                initial_user_message += "\n" + judge_history[0]["content"]
-                gemini_history.append({"role": "user", "parts": [{"text": initial_user_message}]})
-                # Añadir el resto del historial del juez
-                for i in range(1, len(judge_history)):
-                    msg = judge_history[i]
-                    gemini_history.append({"role": msg["role"], "parts": [{"text": msg["content"]}]})
-            else:
-                gemini_history.append({"role": "user", "parts": [{"text": initial_user_message}]})
-            
-            # Añadir el historial propio del detective
-            for entry in self.history:
-                gemini_history.append({"role": entry["role"], "parts": [{"text": entry["content"]}]})
-
-            user_instruction = "Formula una pregunta de sí/no o propone una solución si crees que la tienes. Si propones una solución, usa la palabra clave 'SOLUCIÓN:'."
-            
-            chat = self.client.start_chat(history=gemini_history)
-            response = chat.send_message(user_instruction)
-            next_move = response.text.strip()
-        elif "claude" in self.model_name:
+    def get_next_move(self, judge_context, is_first_move=False):
+        user_instruction = "Formula una pregunta de sí/no o propone una solución si crees que la tienes. Si propones una solución, usa la palabra clave 'SOLUCIÓN:'."
+        
+        if is_first_move:
+            # Para la primera jugada, el contexto es solo la historia inicial
+            initial_message_content = self.system_prompt + "\nAquí está la historia inicial del juego:\n" + judge_context
+            messages_for_model = [{"role": "user", "content": initial_message_content}]
+        else:
+            # Para jugadas subsiguientes, el contexto es el historial completo del juez
             messages_for_model = [{"role": "system", "content": self.system_prompt}]
-            for entry in judge_history:
+            for entry in judge_context:
+                # Asegurarse de que el historial se construya correctamente para el detective
+                # El rol 'user' en judge_context se convierte en 'assistant' para el detective
+                # y el rol 'model' en judge_context se convierte en 'user' para el detective
                 if entry["role"] == "user":
                     messages_for_model.append({"role": "assistant", "content": entry["content"]})
                 elif entry["role"] == "model":
                     messages_for_model.append({"role": "user", "content": entry["content"]})
-            messages_for_model.extend(self.history)
-            user_instruction = "Formula una pregunta de sí/no o propone una solución si crees que la tienes. Si propones una solución, usa la palabra clave 'SOLUCIÓN:'."
+            messages_for_model.extend(self.history) # Añadir el historial propio del detective
+
+        if "gemini" in self.model_name:
+            gemini_history = []
+            if is_first_move:
+                # Para la primera jugada, el system_prompt del detective se fusiona con la historia inicial
+                gemini_history.append({"role": "user", "parts": [{"text": self.system_prompt + "\n" + initial_message_content}]})
+            else:
+                # Para jugadas subsiguientes, construir el historial a partir de judge_context y self.history
+                # El system_prompt del detective se fusiona con el primer mensaje de usuario del historial.
+                
+                # El `judge_context` es `judge_ai.history`.
+                # Si el juez es Ollama, `judge_ai.history` comienza con `{"role": "system", "content": self.system_prompt}`.
+                # Si el juez es Gemini, `judge_ai.history` comienza con `{"role": "user", "parts": [{"text": "Aquí está la historia inicial del juego:\n" + short_story_content}]}`.
+                
+                # Necesitamos un historial que comience con 'user' y alterne 'model'/'user'.
+                
+                # El primer mensaje de usuario en el historial de Gemini debe incluir el system_prompt del detective.
+                
+                first_user_message_content = self.system_prompt
+                
+                # Encontrar el primer mensaje de usuario real del historial del juez
+                actual_judge_history_start_index = 0
+                if judge_ai.is_ollama_model and judge_context and judge_context[0]["role"] == "system":
+                    actual_judge_history_start_index = 1 # Omitir el system prompt de Ollama
+                
+                if judge_context and len(judge_context) > actual_judge_history_start_index:
+                    first_user_message_content += "\n" + judge_context[actual_judge_history_start_index]["content"]
+                    gemini_history.append({"role": "user", "parts": [{"text": first_user_message_content}]})
+                    
+                    # Añadir el resto del historial del juez
+                    for i in range(actual_judge_history_start_index + 1, len(judge_context)):
+                        entry = judge_context[i]
+                        if entry["role"] == "user":
+                            gemini_history.append({"role": "user", "parts": [{"text": entry["content"]}]})
+                        elif entry["role"] == "model":
+                            gemini_history.append({"role": "model", "parts": [{"text": entry["content"]}]})
+                else:
+                    # Si no hay historial del juez (esto no debería pasar en jugadas subsiguientes)
+                    gemini_history.append({"role": "user", "parts": [{"text": first_user_message_content}]})
+                
+                # Añadir el historial propio del detective
+                for entry in self.history:
+                    gemini_history.append({"role": entry["role"], "parts": [{"text": entry["content"]}]})
+
+            chat = self.client.start_chat(history=gemini_history) # Eliminar system_instruction
+            response = chat.send_message(user_instruction)
+            next_move = response.text.strip()
+
+        elif "claude" in self.model_name:
+            # Claude espera solo el último mensaje del usuario, el system_prompt se pasa por separado
+            if is_first_move:
+                messages_for_claude = [{"role": "user", "content": initial_message_content + "\n" + user_instruction}]
+            else:
+                messages_for_claude = messages_for_model + [{"role": "user", "content": user_instruction}]
+            
             response = self.client.messages.create(
                 model=self.model_name,
                 max_tokens=200,
                 system=self.system_prompt,
-                messages=[{"role": "user", "content": user_instruction}] # Claude espera solo el último mensaje del usuario
+                messages=messages_for_claude
             )
             next_move = response.content[0].text.strip()
+
         elif self.is_ollama_model: # Usar el nuevo indicador
-            messages_for_model = [{"role": "system", "content": self.system_prompt}]
-            for entry in judge_history:
-                # Asegurarse de que el historial se construya correctamente para Ollama
-                # El rol 'user' en judge_history se convierte en 'assistant' para el detective
-                # y el rol 'model' en judge_history se convierte en 'user' para el detective
-                if entry["role"] == "user":
-                    messages_for_model.append({"role": "assistant", "content": entry["content"]})
-                elif entry["role"] == "model":
-                    messages_for_model.append({"role": "user", "content": entry["content"]})
-            messages_for_model.extend(self.history)
-            user_instruction = "Formula una pregunta de sí/no o propone una solución si crees que la tienes. Si propones una solución, usa la palabra clave 'SOLUCIÓN:'."
             response = self.client.chat(
                 model=self.model_name,
                 messages=messages_for_model + [{"role": "user", "content": user_instruction}]
@@ -269,12 +307,25 @@ def main():
     judge_ai = JudgeAI(model_name=model_name_judge, is_ollama_model=is_ollama_model_judge)
     detective_ai = DetectiveAI(model_name=model_name_detective, is_ollama_model=is_ollama_model_detective)
 
-    print(f"{Fore.CYAN}IA 1 ({judge_ai.model_name}): {judge_ai.get_initial_story()}{Style.RESET_ALL}")
+    initial_story = judge_ai.get_initial_story()
+    print(f"{Fore.CYAN}IA 1 ({judge_ai.model_name}): {initial_story}{Style.RESET_ALL}")
     pause_for_user()
 
     game_over = False
+    # Primera jugada del detective, solo con la historia inicial
+    detective_move = detective_ai.get_next_move(initial_story, is_first_move=True)
+    print(f"{Fore.MAGENTA}IA 2 ({detective_ai.model_name}): {detective_move}{Style.RESET_ALL}")
+    pause_for_user()
+
+    # El juez responde a la primera pregunta del detective
+    judge_response = judge_ai.respond_to_question(detective_move)
+    print(f"{Fore.CYAN}IA 1 ({judge_ai.model_name}): {judge_response}{Style.RESET_ALL}")
+    pause_for_user()
+
+    # Bucle principal del juego
     while not game_over:
-        detective_move = detective_ai.get_next_move(judge_ai.history)
+        # Jugadas subsiguientes del detective, con el historial completo del juez
+        detective_move = detective_ai.get_next_move(judge_ai.history, is_first_move=False)
         print(f"{Fore.MAGENTA}IA 2 ({detective_ai.model_name}): {detective_move}{Style.RESET_ALL}")
         pause_for_user()
 
